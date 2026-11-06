@@ -1,0 +1,19 @@
+{
+  "name": "tiktok-scraper-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker that collects public TikTok video and profile metadata.",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "start": "wrangler dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}
