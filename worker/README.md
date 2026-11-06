@@ -4,16 +4,22 @@ A Cloudflare Worker that collects **public** TikTok video and creator-profile
 metadata and returns it as JSON or CSV.
 
 It is the edge-hosted half of the project: the Python tool
-(`tiktok-scraper/`) does hashtag discovery with a real browser, and this
+(`tiktok_scraper/`) does hashtag discovery with a real browser, and this
 Worker turns any list of video URLs or creator handles into a clean dataset —
 with the exact same column names, so both can be pooled into one CSV.
+
+> **Note on layout:** `wrangler.toml`, `package.json` and `tsconfig.json` live
+> at the **repository root**, not in `worker/`. Cloudflare's build system runs
+> `npx wrangler deploy` from the repo root, so wrangler must find its config
+> there — otherwise it fails with *"Could not detect a directory containing
+> static files"*. Only the TypeScript source lives in `worker/src/`.
 
 ---
 
 ## Quick start
 
 ```bash
-cd worker
+# from the repository root
 npm install
 npm run dev            # local dev server on http://127.0.0.1:8787
 ```
@@ -27,6 +33,30 @@ You need a free Cloudflare account and to be logged in:
 ```bash
 npx wrangler login
 ```
+
+---
+
+## Deploying from Cloudflare's dashboard
+
+In **Workers & Pages → your Worker → Settings → Builds**, set:
+
+| Field | Value |
+| --- | --- |
+| Build command | `npm run deploy` |
+| Install command | `npm install` |
+| Root directory | `/` (repo root) |
+
+If you leave the install command blank, Cloudflare auto-detects the Python
+`requirements.txt` in this repo and installs pandas/matplotlib/playwright —
+about 90 seconds you do not need. Setting it to `npm install` skips that.
+
+Check the build log for:
+
+```
+Total Upload: 21.67 KiB / gzip: 6.24 KiB
+```
+
+That means the Worker bundled correctly.
 
 ---
 
@@ -143,12 +173,15 @@ rather than raw data. See the ethics section in the top-level `README.md`.
 ## Layout
 
 ```
-worker/
-├── src/
-│   ├── index.ts      # router, batch handling, rate limiting, CORS
-│   ├── tiktok.ts     # page parsing + normalisation
-│   └── types.ts      # shared types and column order
-├── wrangler.toml
+/
+├── wrangler.toml        # Worker config (root - Cloudflare needs it here)
+├── package.json         # npm scripts: dev / deploy / typecheck
 ├── tsconfig.json
-└── package.json
+├── .dev.vars.example    # copy to .dev.vars for local API-key testing
+└── worker/
+    ├── src/
+    │   ├── index.ts     # router, batch handling, rate limiting, CORS
+    │   ├── tiktok.ts    # page parsing + normalisation
+    │   └── types.ts     # shared types and column order
+    └── README.md
 ```
