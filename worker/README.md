@@ -26,7 +26,13 @@ npm run dev            # local dev server on http://127.0.0.1:8787
 
 ```bash
 npm run deploy         # publish to *.workers.dev
+# or, with a smoke test of the live URL afterwards:
+./scripts/deploy.sh
 ```
+
+> `wrangler.toml` must contain the name of the worker you already have live
+> (`name = "hof"` for `hof.talesapi.workers.dev`). A different name publishes
+> a second, empty worker instead of updating yours.
 
 You need a free Cloudflare account and to be logged in:
 
@@ -175,8 +181,10 @@ CSV header.
   in this repo sets `cpu_ms = 30000`, which needs a paid plan; on the free
   plan (10 ms) large batches may fail with a CPU time error. Keep batches
   small if you are on the free tier.
-- **TikTok rate-limits by IP.** Worker egress IPs are shared, so a burst can
-  trip TikTok's bot check. Use `delayMs=1500` or higher for bulk work.
+- **TikTok rate-limits by IP.** Worker egress IPs are shared, so the first
+  request or two to a given page often return `429` before the path opens up.
+  The Worker retries automatically with a 1-4 s backoff, so a single request
+  can take a few seconds. Use `delayMs=1500` or higher for bulk work.
 - **Signed URLs expire.** Thumbnail and avatar URLs carry expiry tokens and
   stop working after a few hours. Download them during collection if you need
   the images.
