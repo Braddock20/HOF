@@ -1,0 +1,3 @@
+# Copy to .dev.vars for local development, then fill in your own value.
+# Set the same value in production with: npx wrangler secret put API_KEY
+API_KEY="change-me"
