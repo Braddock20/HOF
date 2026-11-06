@@ -10,7 +10,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
-from .extract import failed_record, normalize, video_id_from_url, video_item_from_html
+from .extract import (
+    embed_item_to_aweme,
+    failed_record,
+    normalize,
+    video_id_from_url,
+    video_item_from_html,
+)
 from .fetchers import BrowserSession, DEFAULT_UA, FetchError, HttpFetcher
 from .models import ProfileRecord, VideoRecord
 from .storage import build_profile_writer, build_writer, existing_ids, write_all
@@ -85,6 +91,46 @@ def _fetch_profiles(handles: list[str], args: argparse.Namespace, log) -> list[P
     return records
 
 
+def _collect_from_users(
+    handles: list[str], args: argparse.Namespace, log
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Discover each creator's recent posts.
+
+    Uses the public embed page, which renders recent posts server-side, so
+    this needs no browser. Returns ``(fallback_items, video_urls)`` where
+    ``fallback_items`` maps video id -> partial record, used when the full
+    video page cannot be read.
+    """
+    fetcher = HttpFetcher(
+        user_agent=args.user_agent,
+        timeout=args.timeout,
+        retries=args.retries,
+        delay=args.delay,
+        jitter=args.jitter,
+        language=args.lang,
+        logger=log,
+    )
+    fallbacks: dict[str, dict[str, Any]] = {}
+    urls: list[str] = []
+    for handle in handles:
+        clean = handle.lstrip("@").strip()
+        try:
+            videos, _ = fetcher.fetch_user_videos(clean)
+        except FetchError as exc:
+            log(f"  @{clean}: discovery failed ({exc})")
+            continue
+        if not videos:
+            log(f"  @{clean}: no public posts found")
+            continue
+        log(f"  @{clean}: found {len(videos)} recent post(s)")
+        for item in videos[: args.limit]:
+            video_id = str(item.get("id") or "")
+            author = item.get("authorUniqueId") or clean
+            fallbacks[video_id] = embed_item_to_aweme(item)
+            urls.append(f"https://www.tiktok.com/@{author}/video/{video_id}")
+    return fallbacks, urls
+
+
 def _collect_from_browser(
     args: argparse.Namespace, log
 ) -> tuple[list[tuple[dict[str, Any], str, str]], list[str]]:
@@ -124,25 +170,6 @@ def _collect_from_browser(
             results.extend((item, source, "hashtag") for item in items)
             extra_urls.extend(_unseen_links(found.get("links") or [], items)[: args.limit])
 
-        for handle in args.user:
-            log(f"profile @{handle} (limit {args.limit})")
-            source = f"https://www.tiktok.com/@{handle.lstrip('@')}"
-            try:
-                found = session.collect_user(handle, limit=args.limit)
-            except Exception as exc:
-                log(f"  profile @{handle} failed: {exc}")
-                continue
-            if found.get("blocked"):
-                log(
-                    "  TikTok served a bot-check page for this profile. Profile "
-                    "feeds are protected more aggressively than hashtag pages - "
-                    "wait a few minutes, raise --delay, or collect this "
-                    "creator's videos by URL instead."
-                )
-            items = found.get("items") or []
-            log(f"  collected {len(items)} full items, {len(found.get('links') or [])} links")
-            results.extend((item, source, "user") for item in items)
-            extra_urls.extend(_unseen_links(found.get("links") or [], items)[: args.limit])
     return results, list(dict.fromkeys(extra_urls))
 
 
@@ -340,11 +367,19 @@ def main(argv: list[str] | None = None) -> int:
     url_results: list[tuple[dict[str, Any] | None, str, str]] = []
     discovered_urls: list[str] = []
 
-    if args.hashtag or args.user:
-        log("starting browser session for hashtag/profile collection")
+    if args.hashtag:
+        log("starting browser session for hashtag collection")
         browser_items, discovered_urls = _collect_from_browser(args, log)
         if discovered_urls:
             log(f"{len(discovered_urls)} discovered video(s) need full metadata; fetching over HTTP")
+
+    fallback_items: dict[str, dict[str, Any]] = {}
+    user_urls: set[str] = set()
+    if args.user:
+        log(f"discovering recent posts for {len(args.user)} creator(s)")
+        fallback_items, discovered = _collect_from_users(args.user, args, log)
+        user_urls = set(discovered)
+        discovered_urls.extend(discovered)
 
     url_targets = list(dict.fromkeys(url_targets + discovered_urls))
     if url_targets:
@@ -377,10 +412,17 @@ def main(argv: list[str] | None = None) -> int:
     for item, source, mode in browser_items:
         entries.append((item, source, mode, ""))
     for item, url, message in url_results:
-        entries.append((item, url, "url", message))
+        entries.append((item, url, "user" if url in user_urls else "url", message))
 
     try:
         for item, url, mode, message in entries:
+            if item is None:
+                # A partial record from embed discovery beats no record at all.
+                video_id = video_id_from_url(url)
+                if video_id and video_id in fallback_items:
+                    item = fallback_items[video_id]
+                    message = "partial (embed page only)"
+                    mode = "user"
             if item is None:
                 record = failed_record(url, message or "unavailable", source_url=url, discovery_mode=mode)
                 failed += 1
