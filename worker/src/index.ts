@@ -20,6 +20,8 @@
  */
 
 import {
+  embedItemToAweme,
+  embedProfile,
   extractProfile,
   extractVideoItem,
   failedProfile,
@@ -39,6 +41,8 @@ const VERSION = "1.0.0";
 
 /** Free plan allows 50 subrequests; stay well inside that. */
 const MAX_ITEMS = 40;
+/** Profile-post listings cost 1 subrequest per video, so cap them lower. */
+const MAX_PROFILE_POSTS = 20;
 const DEFAULT_DELAY_MS = 1000;
 const DEFAULT_CONCURRENCY = 4;
 
@@ -117,6 +121,70 @@ async function scrapeProfile(
 }
 
 /**
+ * Collect a creator's recent posts, newest first.
+ *
+ * Discovery uses TikTok's public embed page, which renders recent posts
+ * server-side - no browser and no signed API request needed. Each video's
+ * full metadata then comes from its detail page.
+ */
+async function scrapeProfilePosts(
+  handle: string,
+  limit: number,
+  language: string,
+): Promise<{ videos: VideoRecord[]; userInfo: any; error: string | null }> {
+  const scrapedAt = new Date().toISOString();
+  const clean = String(handle || "").replace(/^@/, "").trim();
+  let discovered: any[] = [];
+  let userInfo: any = {};
+
+  try {
+    const embedHtml = await fetchPage(
+      `https://www.tiktok.com/embed/@${encodeURIComponent(clean)}`,
+      language,
+    );
+    const found = embedProfile(embedHtml, clean);
+    userInfo = found.userInfo;
+    discovered = found.videos;
+  } catch (error) {
+    return { videos: [], userInfo: {}, error: `embed page failed: ${error}` };
+  }
+
+  if (!discovered.length) {
+    return {
+      videos: [],
+      userInfo,
+      error: "no public posts found for this account",
+    };
+  }
+
+  const targets = discovered.slice(0, limit);
+  const videos: VideoRecord[] = [];
+  for (const item of targets) {
+    const author = item.authorUniqueId || clean;
+    const url = `https://www.tiktok.com/@${author}/video/${item.id}`;
+    try {
+      const html = await fetchPage(url, language);
+      const { item: aweme, message } = extractVideoItem(html);
+      videos.push(
+        aweme
+          ? normalizeVideo(aweme, url, "user", scrapedAt)
+          : // Fall back to the partial embed record rather than losing the video.
+            normalizeVideo(embedItemToAweme(item), url, "user", scrapedAt),
+      );
+      if (!aweme) {
+        videos[videos.length - 1].status = "partial";
+        videos[videos.length - 1].status_message = message;
+      }
+    } catch (error) {
+      videos.push(normalizeVideo(embedItemToAweme(item), url, "user", scrapedAt));
+      videos[videos.length - 1].status = "partial";
+      videos[videos.length - 1].status_message = String(error);
+    }
+  }
+  return { videos, userInfo, error: null };
+}
+
+/**
  * Run tasks with a bounded concurrency and a pause between request starts,
  * so the worker behaves politely towards TikTok.
  */
@@ -163,6 +231,7 @@ const USAGE = {
     "GET /api/health": "liveness probe",
     "GET /api/video?url=<video url>": "one video's metadata",
     "GET /api/profile?handle=<handle>": "one creator's profile",
+    "GET /api/profile/posts?handle=<handle>": "a creator's recent posts (newest first)",
     "GET /api/scrape?urls=<a,b>&handles=<c,d>": "batch",
     "POST /api/scrape": 'batch with body {"urls": [], "handles": []}',
   },
@@ -237,6 +306,37 @@ export default {
         return csv([record as unknown as Record<string, unknown>], PROFILE_FIELDS as string[]);
       }
       return json(record);
+    }
+
+    // ---- a creator's recent posts -------------------------------------
+    if (url.pathname === "/api/profile/posts") {
+      const handle = url.searchParams.get("handle") || url.searchParams.get("user");
+      if (!handle) return json({ error: "missing ?handle=" }, 400);
+      const limit = Math.min(
+        Number(url.searchParams.get("limit")) || 20,
+        MAX_PROFILE_POSTS,
+      );
+      const result = await scrapeProfilePosts(handle, limit, language);
+      if (format === "csv") {
+        return csv(
+          result.videos as unknown as Record<string, unknown>[],
+          VIDEO_FIELDS as string[],
+        );
+      }
+      return json({
+        handle: String(handle).replace(/^@/, ""),
+        videos: result.videos,
+        user_info: result.userInfo,
+        meta: {
+          requested: limit,
+          returned: result.videos.length,
+          ok: result.videos.filter((v) => v.status === "ok").length,
+          partial: result.videos.filter((v) => v.status === "partial").length,
+          scraped_at: new Date().toISOString(),
+          colo: (ctx as any)?.cf?.colo ?? null,
+        },
+        ...(result.error ? { warning: result.error } : {}),
+      });
     }
 
     // ---- batch --------------------------------------------------------
