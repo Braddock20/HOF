@@ -275,6 +275,117 @@ def failed_profile(handle: str, reason: str, *, source_url: str = "") -> Profile
     )
 
 
+FRONTITY_RE = re.compile(
+    r'<script[^>]*id="__FRONTITY_CONNECT_STATE__"[^>]*type="application/json"[^>]*>(.*?)</script>',
+    re.DOTALL,
+)
+
+
+def parse_frontity(html: str) -> dict[str, Any] | None:
+    """Parse the ``__FRONTITY_CONNECT_STATE__`` blob used by embed pages.
+
+    TikTok's public embed pages (``/embed/@handle``) render the creator's
+    recent videos server-side, which makes them a reliable source of recent
+    post IDs without a browser or an API signature.
+    """
+    match = FRONTITY_RE.search(html or "")
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    data = (payload.get("source") or {}).get("data")
+    return data if isinstance(data, dict) else None
+
+
+def embed_profile(html: str, handle: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Pull ``(userInfo, videoList)`` out of an embed page.
+
+    The video list is ordered newest-first by TikTok.
+    """
+    data = parse_frontity(html)
+    if data is None:
+        return {}, []
+    key = f"/embed/@{handle.lstrip('@')}"
+    profile = data.get(key) or {}
+    if not isinstance(profile, dict):
+        return {}, []
+    user_info = profile.get("userInfo") or {}
+    video_list = profile.get("videoList") or []
+    videos = [v for v in video_list if isinstance(v, dict) and v.get("id")]
+    return user_info, videos
+
+
+def embed_item_to_aweme(item: dict[str, Any]) -> dict[str, Any]:
+    """Convert an embed video entry into the aweme shape ``normalize`` expects.
+
+    Used as a fallback when the full video page cannot be read, so a
+    partially-known video still produces a usable row.
+    """
+    video = {
+        "cover": item.get("coverUrl") or "",
+        "originCover": item.get("originCoverUrl") or "",
+        "dynamicCover": item.get("dynamicCoverUrl") or "",
+        "width": item.get("width"),
+        "height": item.get("height"),
+        "ratio": item.get("ratio"),
+    }
+    return {
+        "id": item.get("id"),
+        "desc": item.get("desc") or "",
+        "author": {"uniqueId": item.get("authorUniqueId") or ""},
+        "video": video,
+        "stats": {"playCount": item.get("playCount")},
+        "createTime": item.get("createTime"),
+    }
+
+
+def embed_user_info_to_profile(
+    user_info: dict[str, Any], handle: str, source_url: str, scraped_at: str = ""
+) -> ProfileRecord:
+    """Build a profile record from embed page user info.
+
+    This is a secondary source: the profile page (``webapp.user-detail``)
+    is richer, but the embed page still exposes bio, avatar and the
+    follower / following counts, so it is a useful fallback.
+    """
+    unique_id = str(user_info.get("uniqueId") or handle.lstrip("@"))
+    profile_url = f"https://www.tiktok.com/@{unique_id}"
+    created_ts = parse_number(user_info.get("createTime"))
+    created_iso = ""
+    created_date = ""
+    if created_ts:
+        try:
+            dt = datetime.fromtimestamp(created_ts, tz=timezone.utc)
+            created_iso = dt.isoformat()
+            created_date = dt.strftime("%Y-%m-%d")
+        except (OverflowError, OSError, ValueError):
+            pass
+
+    hearts = parse_number(user_info.get("heartCount")) or 0
+
+    return ProfileRecord(
+        handle=unique_id,
+        profile_url=profile_url,
+        source_url=source_url or profile_url,
+        user_id=str(user_info.get("id") or ""),
+        nickname=str(user_info.get("nickname") or ""),
+        bio=str(user_info.get("signature") or ""),
+        avatar_thumb=str(user_info.get("avatarThumbUrl") or ""),
+        verified=bool(user_info.get("verified")),
+        is_private=bool(user_info.get("privateAccount")),
+        follower_count=parse_number(user_info.get("followerCount")) or 0,
+        following_count=parse_number(user_info.get("followingCount")) or 0,
+        total_likes=hearts if hearts > 0 else 0,
+        account_created=created_iso,
+        account_created_date=created_date,
+        scraped_at=scraped_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        status="ok",
+        status_message="",
+    )
+
+
 def normalize(
     item: dict[str, Any],
     *,
