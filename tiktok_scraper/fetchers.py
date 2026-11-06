@@ -28,6 +28,8 @@ import urllib.request
 from typing import Any, Callable
 
 from .extract import (
+    embed_profile,
+    embed_user_info_to_profile,
     failed_profile,
     item_from_api,
     parse_rehydration,
@@ -133,7 +135,8 @@ class HttpFetcher:
         """Fetch a creator's public profile details.
 
         One HTTP request: the profile page embeds the creator's bio, avatar,
-        follower/following/post counts and account age as JSON.
+        follower/following/post counts and account age as JSON. If that page
+        cannot be read, the public embed page is used as a fallback.
         """
         handle = str(handle or "").lstrip("@").strip()
         url = f"https://www.tiktok.com/@{urllib.parse.quote(handle)}"
@@ -141,7 +144,43 @@ class HttpFetcher:
             html = self.get(url)
         except FetchError as exc:
             return failed_profile(handle, str(exc), source_url=url)
-        return profile_from_html(html, handle, source_url=url)
+
+        record = profile_from_html(html, handle, source_url=url)
+        if record.status == "ok":
+            return record
+
+        # Fallback: the embed page also carries the creator's public details.
+        try:
+            embed_html = self.get(f"https://www.tiktok.com/embed/@{urllib.parse.quote(handle)}")
+            user_info, _ = embed_profile(embed_html, handle)
+        except FetchError:
+            user_info = {}
+        if user_info:
+            fallback = embed_user_info_to_profile(
+                user_info, handle, url, record.scraped_at
+            )
+            if fallback.status == "ok":
+                return fallback
+        return record
+
+    def fetch_user_videos(self, handle: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Discover a creator's recent posts, newest first.
+
+        Uses TikTok's public embed page, which renders the creator's recent
+        videos server-side. This avoids both a browser and the signed
+        ``/api/post/item_list/`` endpoint that blocks automated requests.
+
+        Returns ``(videos, user_info)``.
+        """
+        handle = str(handle or "").lstrip("@").strip()
+        url = f"https://www.tiktok.com/embed/@{urllib.parse.quote(handle)}"
+        html = self.get(url)
+        user_info, videos = embed_profile(html, handle)
+
+        # The embed list is already newest-first, but sorting on the
+        # (time-ordered) video id makes the guarantee explicit.
+        videos.sort(key=lambda v: int(v["id"]), reverse=True)
+        return videos, user_info
 
 class BrowserSession:
     """Drives Chromium via Playwright to collect hashtag and profile listings.
@@ -343,32 +382,6 @@ class BrowserSession:
         page = self._new_page()
         try:
             url = f"https://www.tiktok.com/tag/{urllib.parse.quote(tag)}"
-            self._log(f"  opening {url}")
-            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(5000)
-            blocked = self._bot_blocked(page)
-            if blocked:
-                self._log("  TikTok returned a bot-check page for this request")
-            links.extend(self._harvest_links(page))
-            self._scroll_until(page, limit, max_scrolls, links)
-        finally:
-            page.close()
-        return {
-            "items": self._captured[:limit],
-            "links": links[: limit * 2],
-            "blocked": blocked,
-        }
-
-    def collect_user(self, handle: str, *, limit: int = 60, max_scrolls: int = 25) -> dict[str, Any]:
-        """Collect videos from a creator's profile (``/@<handle>``)."""
-        handle = handle.lstrip("@").strip()
-        self._captured = []
-        self._has_more = True
-        links: list[str] = []
-        blocked = False
-        page = self._new_page()
-        try:
-            url = f"https://www.tiktok.com/@{urllib.parse.quote(handle)}"
             self._log(f"  opening {url}")
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(5000)
