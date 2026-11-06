@@ -16,6 +16,9 @@ export const DEFAULT_UA =
 const REHYDRATION_RE =
   /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application\/json">([\s\S]*?)<\/script>/;
 
+const FRONTITY_RE =
+  /<script[^>]*id="__FRONTITY_CONNECT_STATE__"[^>]*type="application\/json"[^>]*>([\s\S]*?)<\/script>/;
+
 const HASHTAG_RE = /#([\wÀ-ɏ]+)/g;
 const MENTION_RE = /@([\w.\-]+)/g;
 
@@ -437,4 +440,58 @@ export async function fetchPage(url: string, language = "en-US"): Promise<string
     throw new Error(`HTTP ${response.status} for ${url}`);
   }
   return await response.text();
+}
+
+/**
+ * Parse the `__FRONTITY_CONNECT_STATE__` blob used by TikTok's public embed
+ * pages. The embed page renders a creator's recent posts server-side, which
+ * is the only reliable way to list a profile's posts without a browser or a
+ * signed API request.
+ */
+export function parseFrontity(html: string): any | null {
+  const match = FRONTITY_RE.exec(html);
+  if (!match) return null;
+  try {
+    const payload = JSON.parse(match[1]);
+    const data = payload?.source?.data;
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Pull `{ userInfo, videos }` out of an embed page (videos are newest-first). */
+export function embedProfile(
+  html: string,
+  handle: string,
+): { userInfo: any; videos: any[] } {
+  const data = parseFrontity(html);
+  if (!data) return { userInfo: {}, videos: [] };
+  const key = `/embed/@${handle.replace(/^@/, "")}`;
+  const profile = data[key];
+  if (!profile || typeof profile !== "object") return { userInfo: {}, videos: [] };
+  const videos = (profile.videoList || []).filter(
+    (v: any) => v && typeof v === "object" && v.id,
+  );
+  // Video ids are time-ordered, so sorting descending guarantees newest-first.
+  videos.sort((a: any, b: any) => Number(BigInt(b.id) - BigInt(a.id)));
+  return { userInfo: profile.userInfo || {}, videos };
+}
+
+/** Convert an embed entry into the aweme shape `normalizeVideo` expects. */
+export function embedItemToAweme(item: any): any {
+  return {
+    id: item.id,
+    desc: item.desc || "",
+    author: { uniqueId: item.authorUniqueId || "" },
+    video: {
+      cover: item.coverUrl || "",
+      originCover: item.originCoverUrl || "",
+      dynamicCover: item.dynamicCoverUrl || "",
+      width: item.width,
+      height: item.height,
+      ratio: item.ratio,
+    },
+    stats: { playCount: item.playCount },
+  };
 }
