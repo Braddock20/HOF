@@ -424,22 +424,52 @@ export function failedProfile(
   };
 }
 
-/** Fetch a TikTok page with browser-like headers. */
-export async function fetchPage(url: string, language = "en-US"): Promise<string> {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": DEFAULT_UA,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": `${language},en;q=0.9`,
-      Referer: "https://www.tiktok.com/",
-      "Upgrade-Insecure-Requests": "1",
-    },
-    redirect: "follow",
-  });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} for ${url}`);
+/**
+ * Fetch a TikTok page with browser-like headers.
+ *
+ * TikTok throttles per IP with a token bucket: the first request or two from
+ * a fresh Cloudflare egress address are answered with `429 Too Many
+ * Requests`, and later ones succeed. Retrying with a short backoff is what
+ * makes the embed page reliably reachable from the edge.
+ */
+export async function fetchPage(
+  url: string,
+  language = "en-US",
+  retries = 4,
+): Promise<string> {
+  let lastStatus = 0;
+  let lastError = "";
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) {
+      // 1s, 2s, 3s, 4s
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+    }
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": DEFAULT_UA,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": `${language},en;q=0.9`,
+          Referer: "https://www.tiktok.com/",
+          "Upgrade-Insecure-Requests": "1",
+        },
+        redirect: "follow",
+      });
+
+      if (response.ok) return await response.text();
+
+      lastStatus = response.status;
+      // Only throttle responses and server errors are worth retrying.
+      if (response.status !== 429 && response.status < 500) break;
+    } catch (error) {
+      lastError = String(error);
+    }
   }
-  return await response.text();
+
+  throw new Error(
+    `HTTP ${lastStatus}${lastError ? ` ${lastError}` : ""} for ${url}`,
+  );
 }
 
 /**
