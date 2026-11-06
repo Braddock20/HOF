@@ -1,0 +1,17 @@
+name = "tiktok-scraper"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+# Optional shared secret. If you set it, every request must send it:
+#   npx wrangler secret put API_KEY
+# and callers pass it as ?key=..., X-API-Key: ..., or Authorization: Bearer ...
+# (leave unset for a public demo worker)
+
+[observability]
+enabled = true
+
+# The free plan allows 50 subrequests per request; one TikTok page = one
+# subrequest, and MAX_ITEMS in src/index.ts keeps batches inside that.
+[limits]
+cpu_ms = 30000
