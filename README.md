@@ -305,11 +305,17 @@ from somewhere other than your laptop, or expose the scraper as a small
 service for your project.
 
 ```bash
-cd worker
+# from the repository root
 npm install
 npm run dev        # local server on http://127.0.0.1:8787
 npm run deploy     # publishes to *.workers.dev
 ```
+
+> **`wrangler.toml` lives at the repository root, not in `worker/`.** Cloudflare
+> runs `npx wrangler deploy` from the repo root, so wrangler has to find its
+> config there. If it doesn't, the build fails with *"Could not detect a
+> directory containing static files (e.g. html, css and js) for the project"*.
+> Only the TypeScript source lives in `worker/src/`.
 
 | Endpoint | What it does |
 | --- | --- |
@@ -328,6 +334,18 @@ profiles), so data from both can be pooled into one CSV.
 python -m tiktok_scraper --hashtag booktok --limit 50 --out data/
 curl "https://tiktok-scraper.YOUR-SUBDOMAIN.workers.dev/api/scrape?format=csv&handles=booktok"
 ```
+
+**Cloudflare dashboard settings** (Workers & Pages → your Worker → Settings →
+Builds):
+
+| Field | Value |
+| --- | --- |
+| Build command | `npm run deploy` |
+| Install command | `npm install` |
+
+Setting the install command explicitly skips Cloudflare auto-detecting the
+Python `requirements.txt` and installing pandas/matplotlib/playwright for
+nothing — about 90 seconds saved per build.
 
 **What the Worker cannot do:** hashtag discovery. Workers cannot run a
 browser, and TikTok renders hashtag listings client-side — so the Python tool
@@ -406,6 +424,8 @@ Please read this before you submit anything built with this tool.
 | `status = failed` on a profile | no such account, or it was blocked/suspended | check the handle; private accounts still return public stats |
 | `ModuleNotFoundError: playwright` | browser deps missing | `pip install playwright && python -m playwright install chromium` |
 | Worker returns `CPU time exceeded` | free plan's 10 ms CPU cap | use fewer items per batch, or switch to the paid plan (`cpu_ms = 30000`) |
+| Cloudflare build: *"Could not detect a directory containing static files"* | `npx wrangler deploy` ran from the repo root but found no `wrangler.toml` there | `wrangler.toml` must be at the **repo root** (it is, in this repo) — keep it there, or set the build command to `cd worker && npx wrangler deploy --config ../wrangler.toml` |
+| Cloudflare build: `ERESOLVE` during `npm install` | `@cloudflare/workers-types` version mismatch with wrangler | keep the version in `package.json` in step with wrangler's peer requirement (`^5.x`) |
 | Worker returns 401 | `API_KEY` secret is set | send it as `X-API-Key`, `Authorization: Bearer`, or `?key=` |
 | Chart is empty | all rows failed | run the scraper again and check the CSV first |
 
@@ -415,19 +435,23 @@ Please read this before you submit anything built with this tool.
 
 ```
 tiktok-scraper/
-├── tiktok_scraper/
+├── tiktok_scraper/       # Python package
 │   ├── __init__.py
 │   ├── __main__.py      # python -m tiktok_scraper
 │   ├── cli.py           # argument parsing + orchestration
 │   ├── fetchers.py      # HTTP fetcher + Playwright session
 │   ├── extract.py       # JSON -> flat records
-│   ├── models.py        # record schema
+│   ├── models.py        # record schemas
 │   └── storage.py       # CSV / JSONL / SQLite writers
 ├── analyze.py           # charts + summary statistics
-├── worker/              # Cloudflare Worker (edge-hosted API)
+├── worker/              # Cloudflare Worker source
 │   ├── src/index.ts     # router, batching, rate limiting
 │   ├── src/tiktok.ts    # page parsing + normalisation
-│   └── wrangler.toml
+│   └── src/types.ts     # shared types and column order
+├── wrangler.toml        # Worker config (repo root - Cloudflare needs it here)
+├── package.json         # npm scripts: dev / deploy / typecheck
+├── tsconfig.json
+├── .dev.vars.example    # copy to .dev.vars for local API-key testing
 ├── examples/urls.txt
 ├── requirements.txt
 ├── METHODOLOGY_TEMPLATE.md
