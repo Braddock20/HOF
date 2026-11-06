@@ -5,7 +5,7 @@
 # find its config there. The TypeScript source stays in worker/src/ to keep
 # it separate from the Python package.
 
-name = "tiktok-scraper"
+name = "hof"
 main = "worker/src/index.ts"
 compatibility_date = "2025-01-01"
 workers_dev = true
