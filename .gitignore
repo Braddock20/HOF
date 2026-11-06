@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# collected data (regenerate with the scraper)
+tiktok_data/
+data/
+*.sqlite3-journal
+
+# worker local secrets
+worker/.dev.vars
+worker/node_modules/
+worker/.wrangler/
