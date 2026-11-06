@@ -351,6 +351,18 @@ npm run dev        # local server on http://127.0.0.1:8787
 npm run deploy     # publishes to *.workers.dev
 ```
 
+Or use the helper, which deploys and then smoke-tests the live URL:
+
+```bash
+./scripts/deploy.sh
+```
+
+> **Check the worker name in `wrangler.toml`.** It must match the worker you
+> already have live (e.g. `name = "hof"`). If it says something else,
+> `npm run deploy` publishes a *second*, empty worker under a new name and
+> your existing URL never changes — the classic "why is my old URL still
+> showing the old version?" moment.
+
 > **`wrangler.toml` lives at the repository root, not in `worker/`.** Cloudflare
 > runs `npx wrangler deploy` from the repo root, so wrangler has to find its
 > config there. If it doesn't, the build fails with *"Could not detect a
@@ -428,6 +440,13 @@ worth it if the template dependencies are not actually used.
 
 Whichever you pick, commit the regenerated `package-lock.json`, otherwise the
 next build fails the same way.
+
+**Rate limiting.** TikTok throttles per IP with a token bucket, and
+Cloudflare's shared egress addresses hit it hard: the first request or two
+often come back `429 Too Many Requests` before the path opens up. The Worker
+therefore retries with a short backoff on every page fetch, which is what
+makes the embed page reachable from the edge. A single request can take a
+few seconds for that reason.
 
 **What the Worker cannot do:** hashtag discovery. Workers cannot run a
 browser, and TikTok renders hashtag listings client-side — so the Python tool
@@ -529,6 +548,7 @@ tiktok-scraper/
 ├── analyze.py           # charts + summary statistics
 ├── scripts/
 │   ├── preflight.sh       # run the Cloudflare build locally before pushing
+│   ├── deploy.sh          # deploy + smoke-test the live URL
 │   ├── sync-lockfile.sh   # rebuild the lock file from your package.json
 │   └── reset-deps.sh      # restore the known-good dependency set
 ├── worker/              # Cloudflare Worker source
