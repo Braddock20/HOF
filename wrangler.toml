@@ -5,7 +5,7 @@
 # find its config there. The TypeScript source stays in worker/src/ to keep
 # it separate from the Python package.
 
-name = "hof"
+name = "tiktok-scraper"
 main = "worker/src/index.ts"
 compatibility_date = "2025-01-01"
 workers_dev = true
@@ -20,5 +20,6 @@ enabled = true
 
 # The free plan allows 50 subrequests per request; one TikTok page = one
 # subrequest, and MAX_ITEMS in worker/src/index.ts keeps batches inside that.
-# Note: [limits] cpu_ms is intentionally omitted - custom CPU limits need a
-# paid plan (the free tier allows only 10 ms and rejects the setting).
+# Note: cpu_ms = 30000 needs a paid plan - the free tier allows only 10 ms.
+[limits]
+cpu_ms = 30000
