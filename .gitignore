@@ -9,7 +9,7 @@ tiktok_data/
 data/
 *.sqlite3-journal
 
-# worker local secrets
-worker/.dev.vars
-worker/node_modules/
-worker/.wrangler/
+# Cloudflare Worker
+node_modules/
+.wrangler/
+.dev.vars
