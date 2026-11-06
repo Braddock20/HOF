@@ -20,6 +20,7 @@
  */
 
 import {
+  DEFAULT_UA,
   embedItemToAweme,
   embedProfile,
   extractProfile,
@@ -273,12 +274,13 @@ export default {
 
     // ---- health & usage --------------------------------------------
     if (url.pathname === "/api/health") {
+      const cf = (request as any)?.cf ?? (ctx as any)?.cf ?? {};
       return json({
         ok: true,
         version: VERSION,
         time: new Date().toISOString(),
-        colo: (ctx as any)?.cf?.colo ?? null,
-        country: (ctx as any)?.cf?.country ?? null,
+        colo: cf.colo ?? null,
+        country: cf.country ?? null,
       });
     }
 
@@ -316,6 +318,7 @@ export default {
         Number(url.searchParams.get("limit")) || 20,
         MAX_PROFILE_POSTS,
       );
+      const cfInfo = (request as any)?.cf ?? (ctx as any)?.cf ?? {};
       const result = await scrapeProfilePosts(handle, limit, language);
       if (format === "csv") {
         return csv(
@@ -333,7 +336,7 @@ export default {
           ok: result.videos.filter((v) => v.status === "ok").length,
           partial: result.videos.filter((v) => v.status === "partial").length,
           scraped_at: new Date().toISOString(),
-          colo: (ctx as any)?.cf?.colo ?? null,
+          colo: cfInfo.colo ?? null,
         },
         ...(result.error ? { warning: result.error } : {}),
       });
@@ -370,6 +373,7 @@ export default {
         );
       }
 
+      const cfInfo = (request as any)?.cf ?? (ctx as any)?.cf ?? {};
       const delayMs = Number(url.searchParams.get("delayMs")) || DEFAULT_DELAY_MS;
       const concurrency = Number(url.searchParams.get("concurrency")) || DEFAULT_CONCURRENCY;
 
@@ -404,7 +408,7 @@ export default {
           ok: okVideos + okProfiles,
           failed: total - okVideos - okProfiles,
           scraped_at: new Date().toISOString(),
-          colo: (ctx as any)?.cf?.colo ?? null,
+          colo: cfInfo.colo ?? null,
         },
       });
     }
