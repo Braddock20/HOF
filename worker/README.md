@@ -50,6 +50,20 @@ If you leave the install command blank, Cloudflare auto-detects the Python
 `requirements.txt` in this repo and installs pandas/matplotlib/playwright —
 about 90 seconds you do not need. Setting it to `npm install` skips that.
 
+**Before your first push**, run the pre-flight check from the repository
+root. It performs the same steps the Cloudflare build performs:
+
+```bash
+./scripts/preflight.sh
+```
+
+If it reports that `npm ci` cannot install because the lock file is out of
+sync, your repo's `package.json` and `package-lock.json` describe different
+dependency sets. Fix it with `./scripts/sync-lockfile.sh` (rebuilds the lock
+file from your `package.json`, leaving your dependencies alone),
+`./scripts/reset-deps.sh` (restore this project's lean dependency set), or by
+setting the dashboard install command to `npm install` instead of `npm ci`.
+
 Check the build log for:
 
 ```
@@ -68,6 +82,7 @@ That means the Worker bundled correctly.
 | `GET /api/health` | liveness probe (returns the colo it ran in) |
 | `GET /api/video?url=<video url>` | one video's metadata |
 | `GET /api/profile?handle=<handle>` | one creator's public profile |
+| `GET /api/profile/posts?handle=<handle>` | a creator's recent posts, newest first |
 | `GET /api/scrape?urls=a,b&handles=c,d` | batch, query form |
 | `POST /api/scrape` | batch, JSON body |
 
@@ -81,6 +96,9 @@ curl "https://tiktok-scraper.YOUR-SUBDOMAIN.workers.dev/api/video?url=https://ww
 
 # one creator: bio, avatar, followers, following, post count
 curl "https://tiktok-scraper.YOUR-SUBDOMAIN.workers.dev/api/profile?handle=bellapoarch"
+
+# a creator's 5 most recent posts, with full metadata
+curl "https://tiktok-scraper.YOUR-SUBDOMAIN.workers.dev/api/profile/posts?handle=charlidamelio&limit=5"
 
 # batch, as CSV
 curl "https://tiktok-scraper.YOUR-SUBDOMAIN.workers.dev/api/scrape?format=csv&urls=URL1,URL2&handles=bellapoarch"
@@ -146,7 +164,11 @@ CSV header.
 
 - **No hashtag discovery.** Workers cannot run a browser, and TikTok renders
   hashtag listings client-side. Use the Python tool to find videos, then feed
-  the URLs here.
+  the URLs here. (Creator *profile posts* do work here — see
+  `/api/profile/posts`.)
+- **Profile posts are capped at 20 per request**, because each one costs a
+  subrequest for its detail page. TikTok's embed page typically exposes 3-13
+  recent posts per creator.
 - **Subrequest cap.** 40 items per request on the free plan. Batch larger
   collections across several requests.
 - **CPU limit.** Parsing a full TikTok page costs some CPU. The `wrangler.toml`
