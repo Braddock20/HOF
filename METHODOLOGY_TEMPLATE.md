@@ -36,13 +36,14 @@ If you also collected **creator profiles** (`--profile`), add:
 ## 3. How it was collected
 
 - **Tool:** `tiktok-scraper` (this repository), written in Python.
-- **Method:** *(pick one)*
+- **Method:** *(pick one or more)*
   - `[ ]` single video URLs fetched over HTTP
   - `[ ]` hashtag page `/tag/<tag>` collected with a headless browser
-  - `[ ]` creator profile `/@<handle>` collected with a headless browser
+  - `[ ]` creator's recent posts via the public embed page (`/embed/@handle`)
+  - `[ ]` creator profile details (bio, avatar, follower counts)
 - **Hashtag(s)/profile(s) used:** *(e.g. `#booktok`, `#studytok`)*
-- **Number of URLs requested:** *(e.g. 119)*
-- **Number of videos successfully collected:** *(e.g. 119)*
+- **Number of URLs requested:** *(e.g. 156)*
+- **Number of videos successfully collected:** *(e.g. 156)*
 - **Success rate:** *(successful / requested — report this, it's expected to be
   below 100% because videos get deleted or made private)*
 - **Date and time of collection:** *(e.g. 6 November 2026, 11:42–11:46 UTC)*
@@ -53,7 +54,7 @@ If you also collected **creator profiles** (`--profile`), add:
 
 - **Snapshot, not a trend.** Engagement counts change every hour. These
   numbers describe the sample on the collection date only.
-- **Sample size.** *(e.g. 119 videos)* — small enough for hand analysis, large
+- **Sample size.** *(e.g. 156 videos)* — small enough for hand analysis, large
   enough to spot patterns, but not representative of all of TikTok.
 - **Selection bias.** Hashtag pages are ranked by TikTok's algorithm, not
   randomly. You are seeing what TikTok chose to promote, and that algorithm
@@ -66,9 +67,9 @@ If you also collected **creator profiles** (`--profile`), add:
 - **Timezone.** Publish times are recorded in UTC, not the creator's local time.
 - **Discovery is algorithmic.** Hashtag pages are ranked by TikTok's
   recommendation system, so the sample reflects promoted content, not a
-  random draw from the tag. Creator *profile* feeds are additionally
-  bot-protected and often refuse to load at all — if you use them, say how
-  many attempts were needed and how many succeeded.
+  random draw from the tag. Creator profile posts come from TikTok's embed
+  page, which returns roughly 3-13 recent posts per creator — so a
+  "recent posts" sample is a *recent* slice, not a full back-catalogue.
 
 ## 5. Ethics and legality
 
@@ -121,7 +122,7 @@ use the included `sample_data/tiktok_metadata.csv` instead.
 
 **Headline finding:**
 
-> *(e.g. Across 119 videos, #booktok appeared in 52 of them and accounted for
+> *(e.g. Across 156 videos, #booktok appeared in 56 of them and accounted for
 > 69% of all likes in the sample.)*
 
 **Supporting evidence:** *(reference the figure numbers)*
