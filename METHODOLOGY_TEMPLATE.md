@@ -104,7 +104,9 @@ python -m tiktok_scraper --profile bellapoarch --profile booktok --out data/
 Or run the edge-hosted Worker instead (same output columns):
 
 ```bash
-cd worker && npm install && npm run deploy
+# from the repository root
+npm install
+npm run deploy
 curl "https://tiktok-scraper.YOUR-SUBDOMAIN.workers.dev/api/scrape?format=csv&handles=bellapoarch"
 ```
 
