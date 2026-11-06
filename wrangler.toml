@@ -1,17 +1,24 @@
-name = "hof-api"
-main = "src/index.ts"
-compatibility_date = "2026-11-06"
-compatibility_flags = ["nodejs_compat"]
+# Cloudflare Worker config.
+#
+# This file lives at the REPOSITORY ROOT on purpose: Cloudflare's build
+# system runs `npx wrangler deploy` from the repo root, so wrangler must
+# find its config there. The TypeScript source stays in worker/src/ to keep
+# it separate from the Python package.
 
-[vars]
-APP_ENV = "development"
-LOG_LEVEL = "info"
-RATE_LIMIT_ENABLED = "true"
+name = "hof"
+main = "worker/src/index.ts"
+compatibility_date = "2025-01-01"
+workers_dev = true
 
-[env.staging]
-name = "hof-api-staging"
-vars = { APP_ENV = "staging", LOG_LEVEL = "info", RATE_LIMIT_ENABLED = "true" }
+# Optional shared secret. If you set it, every request must send it:
+#   npx wrangler secret put API_KEY
+# and callers pass it as ?key=..., X-API-Key: ..., or Authorization: Bearer ...
+# (leave unset for a public demo worker)
 
-[env.production]
-name = "hof-api"
-vars = { APP_ENV = "production", LOG_LEVEL = "warn", RATE_LIMIT_ENABLED = "true" }
+[observability]
+enabled = true
+
+# The free plan allows 50 subrequests per request; one TikTok page = one
+# subrequest, and MAX_ITEMS in worker/src/index.ts keeps batches inside that.
+# Note: [limits] cpu_ms is intentionally omitted - custom CPU limits need a
+# paid plan (the free tier allows only 10 ms and rejects the setting).
