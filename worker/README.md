@@ -166,6 +166,52 @@ CSV header.
 
 ---
 
+## Failure handling
+
+Every response carries a `status` so the caller knows what happened:
+
+| status | meaning | retry? |
+| --- | --- | --- |
+| `ok` | the request succeeded | - |
+| `partial` | some rows only have embed-level data | optional |
+| `empty` | the account exists but lists no public posts | no |
+| `not_found` | the account does not exist (TikTok errorCode 10221) | no |
+| `restricted` | TikTok blocks this account (errorCode 10101 / 209002) | no |
+| `rate_limited` | TikTok throttled the request | yes, later |
+| `failed` | unexpected failure, see `status_message` | depends |
+
+### TikTok's three ways of saying "slow down"
+
+The important one is easy to miss. TikTok signals throttling with:
+
+- `429 Too Many Requests`
+- `5xx` from the edge
+- **`400 Bad Request` with the body `ratelimit triggered`**
+
+The third one looks like a broken request, so clients that only retry on 429
+and 5xx abort instantly - and accounts that work fine a minute later appear
+permanently unavailable. The Worker treats all three as retryable, with a
+1-4 s backoff, and also detects the account-level error codes (`10221` =
+gone, `10101` = blocked) in the error body.
+
+## Speed
+
+- Video detail pages are fetched **in parallel** (pool of 6, configurable with
+  `DETAIL_CONCURRENCY`) instead of one after another. Fetching 20 posts
+  sequentially is ~20 round trips; in parallel it is ~4.
+- Every fetched page is stored in the **Cloudflare cache** for
+  `CACHE_TTL_SECONDS` (default 300 s). A cron that re-pulls the same videos
+  every five minutes gets them from the cache in ~150 ms instead of
+  re-downloading them.
+- The profile page and the embed page are fetched **concurrently**, so their
+  latencies overlap instead of adding up.
+- A per-request time budget (`PAGE_BUDGET_MS`) stops one slow account from
+  eating the whole Worker invocation; videos not reached in time come back
+  as `partial` rows with the embed-level data instead of being lost.
+
+Typical numbers measured against live TikTok: 5 posts in ~1.5-2.5 s cold,
+~120 ms warm; 20 posts in ~1.3-2.5 s cold, ~200 ms warm.
+
 ## Limits, honestly
 
 - **No hashtag discovery.** Workers cannot run a browser, and TikTok renders
