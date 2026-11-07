@@ -456,6 +456,21 @@ included `wrangler.toml` sets `cpu_ms = 30000`, which needs a paid plan.
 
 See `worker/README.md` for the full API reference and deployment notes.
 
+### Optional patch for `hof-base`
+
+`hof-base-collector-patch.diff` teaches `hof-base`'s collector about the new
+`status` values, so a blocked or deleted account is not retried three times
+before giving up, and an account that genuinely has no posts is treated as a
+success instead of an error:
+
+```bash
+cd path/to/hof-base
+git apply /path/to/hof-base-collector-patch.diff
+```
+
+It is optional - the Worker works without it, but `hof-base` will retry
+permanently-blocked accounts three times before pausing.
+
 ---
 
 ## 7. Ethics, legality and good practice
@@ -547,6 +562,7 @@ tiktok-scraper/
 │   └── storage.py       # CSV / JSONL / SQLite writers
 ├── analyze.py           # charts + summary statistics
 ├── scripts/
+│   ├── upgrade-scraper.sh # copy the v2 files into an existing scraper repo
 │   ├── preflight.sh       # run the Cloudflare build locally before pushing
 │   ├── deploy.sh          # deploy + smoke-test the live URL
 │   ├── sync-lockfile.sh   # rebuild the lock file from your package.json
@@ -561,6 +577,8 @@ tiktok-scraper/
 ├── .dev.vars.example    # copy to .dev.vars for local API-key testing
 ├── examples/urls.txt
 ├── requirements.txt
+├── UPGRADE.md           # how to move an existing scraper repo to v2
+├── hof-base-collector-patch.diff   # optional: teach hof-base the new statuses
 ├── METHODOLOGY_TEMPLATE.md
 └── README.md
 ```
