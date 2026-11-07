@@ -1,12 +1,3 @@
-/**
- * TikTok page parsing for the Worker.
- *
- * TikTok embeds its metadata as a JSON blob in the page HTML
- * (`__UNIVERSAL_DATA_FOR_REHYDRATION__`), so a single `fetch` plus a
- * `JSON.parse` gives us everything we need. No browser required - which
- * matters on Workers, where Chromium is not available.
- */
-
 import { ProfileRecord, VideoRecord } from "./types";
 
 export const DEFAULT_UA =
@@ -28,6 +19,23 @@ const MULTIPLIERS: Record<string, number> = {
   B: 1_000_000_000,
 };
 
+/** How a TikTok request failed. Mirrors the statuses `hof-base` understands. */
+export type FailureKind = "not_found" | "restricted" | "rate_limited" | "error";
+
+export class TikTokError extends Error {
+  readonly kind: FailureKind;
+  readonly status: number;
+  readonly retryable: boolean;
+
+  constructor(kind: FailureKind, message: string, status = 0, retryable = false) {
+    super(message);
+    this.name = "TikTokError";
+    this.kind = kind;
+    this.status = status;
+    this.retryable = retryable;
+  }
+}
+
 /** Coerce a TikTok stat into a number, understanding K/M/B suffixes. */
 export function parseNumber(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
@@ -47,7 +55,180 @@ export function parseNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? Math.round(parsed * multiplier) : null;
 }
 
-/** Pull the `__DEFAULT_SCOPE__` object out of a TikTok HTML page. */
+// ---------------------------------------------------------------- fetching
+
+export interface FetchOptions {
+  language?: string;
+  /** ExecutionContext, used to cache the response in the background. */
+  ctx?: ExecutionContext;
+  /** Cache lifetime in seconds. 0 disables caching. */
+  cacheTtl?: number;
+  /** Cache key suffix, so different variants do not collide. */
+  cacheTag?: string;
+  retries?: number;
+  signal?: AbortSignal;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Does this body mean "you are being throttled"?
+ *
+ * TikTok signals throttling three different ways, and only one of them is
+ * an HTTP error code:
+ *   - 429 Too Many Requests
+ *   - 400 with the plain-text body "ratelimit triggered"
+ *   - 5xx from the edge
+ *
+ * The 400 case is the trap: it looks like a bad request, so naive clients
+ * abort instantly instead of retrying, and accounts that work fine a
+ * minute later appear "unavailable".
+ */
+function isThrottleBody(text: string): boolean {
+  if (!text) return false;
+  const head = text.slice(0, 400).toLowerCase();
+  if (head.includes("ratelimit triggered")) return true;
+  if (head.includes("rate limit") || head.includes("too many requests")) return true;
+  return false;
+}
+
+/** TikTok's account-level error codes, read out of the error body. */
+function errorCodeIn(text: string): string | null {
+  const match = /"errorCode"\s*[:=]\s*"?(\d+)"?/.exec(text || "");
+  return match ? match[1] : null;
+}
+
+/**
+ * Classify a failed TikTok response.
+ *   10221 -> the account does not exist
+ *   10101 -> the account exists but TikTok blocks the embed surface
+ *   209002 (profile scope) -> the account is restricted
+ */
+function classifyFailure(status: number, body: string): TikTokError {
+  const code = errorCodeIn(body);
+  if (code === "10221") {
+    return new TikTokError("not_found", "TikTok account does not exist", status);
+  }
+  if (code === "10101") {
+    return new TikTokError(
+      "restricted",
+      "TikTok blocks this account (errorCode 10101)",
+      status,
+    );
+  }
+  if (status === 404) {
+    return new TikTokError("not_found", "TikTok returned 404", status);
+  }
+  if (status === 429 || isThrottleBody(body)) {
+    return new TikTokError(
+      "rate_limited",
+      "TikTok rate limited the request",
+      status,
+      true,
+    );
+  }
+  if (status >= 500) {
+    return new TikTokError("error", `TikTok server error (HTTP ${status})`, status, true);
+  }
+  return new TikTokError("error", `TikTok rejected the request (HTTP ${status})`, status);
+}
+
+/** Cache key for a TikTok page fetch. */
+function cacheKey(url: string, tag: string): Request {
+  return new Request(`https://cache.local/${tag}/${encodeURIComponent(url)}`, {
+    headers: { "Cache-Tag": tag },
+  });
+}
+
+/**
+ * Fetch a TikTok page.
+ *
+ * Retries throttles (429, 5xx, and the 400 "ratelimit triggered" case) with
+ * a backoff, and caches successful responses in the Cloudflare cache so the
+ * every-5-minute cron does not re-download the same pages.
+ */
+export async function fetchPage(
+  url: string,
+  options: FetchOptions = {},
+): Promise<string> {
+  const {
+    language = "en-US",
+    ctx,
+    cacheTtl = 300,
+    cacheTag = "tiktok-page",
+    retries = 4,
+    signal,
+  } = options;
+
+  const cache = typeof caches !== "undefined" ? caches.default : null;
+  const key = cacheKey(url, cacheTag);
+
+  if (cache && cacheTtl > 0) {
+    const hit = await cache.match(key);
+    if (hit) return await hit.text();
+  }
+
+  let lastError: TikTokError | null = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) {
+      // 1s, 2s, 3s, 4s - jittered so parallel workers do not sync up.
+      await sleep(attempt * 1000 + Math.floor(Math.random() * 400));
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers: {
+          "User-Agent": DEFAULT_UA,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": `${language},en;q=0.9`,
+          Referer: "https://www.tiktok.com/",
+          "Upgrade-Insecure-Requests": "1",
+        },
+        redirect: "follow",
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      lastError = new TikTokError(
+        "error",
+        `network error fetching ${url}: ${String(error)}`,
+        0,
+        true,
+      );
+      continue;
+    }
+
+    if (response.ok) {
+      const text = await response.text();
+      if (cache && cacheTtl > 0) {
+        const copy = new Response(text, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": `public, max-age=${cacheTtl}`,
+          },
+        });
+        if (ctx) ctx.waitUntil(cache.put(key, copy));
+        else await cache.put(key, copy);
+      }
+      return text;
+    }
+
+    const body = await response.text().catch(() => "");
+    const failure = classifyFailure(response.status, body);
+    lastError = failure;
+
+    // Only throttles and server errors are worth another attempt.
+    if (!failure.retryable) throw failure;
+  }
+
+  throw lastError ?? new TikTokError("error", `failed to fetch ${url}`);
+}
+
+// ---------------------------------------------------------------- parsing
+
 export function parseRehydration(html: string): any | null {
   const match = REHYDRATION_RE.exec(html);
   if (!match) return null;
@@ -60,7 +241,19 @@ export function parseRehydration(html: string): any | null {
   }
 }
 
-/** Extract the raw aweme object from a video page. */
+export function parseFrontity(html: string): any | null {
+  const match = FRONTITY_RE.exec(html);
+  if (!match) return null;
+  try {
+    const payload = JSON.parse(match[1]);
+    const data = payload?.source?.data;
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read the video-detail payload out of a TikTok video page. */
 export function extractVideoItem(html: string): { item: any; message: string } {
   const scope = parseRehydration(html);
   if (!scope) return { item: null, message: "no_rehydration_json" };
@@ -85,35 +278,95 @@ export function extractVideoItem(html: string): { item: any; message: string } {
   return { item: itemStruct, message: "" };
 }
 
-/** Extract the raw profile object from a creator page. */
+/** Read the creator payload out of a TikTok profile page. */
 export function extractProfile(
   html: string,
   handle: string,
-): { user: any; stats: any; message: string } {
+): { user: any; stats: any; message: string; statusCode: number | null } {
   const scope = parseRehydration(html);
-  if (!scope) return { user: null, stats: null, message: "no_rehydration_json" };
+  if (!scope) {
+    return { user: null, stats: null, message: "no_rehydration_json", statusCode: null };
+  }
 
   const detail = scope["webapp.user-detail"] || {};
-  const statusCode = detail.statusCode;
+  const statusCode = detail.statusCode ?? null;
   const statusMsg = detail.statusMsg || "";
   const userInfo = detail.userInfo || {};
   const user = userInfo.user;
   const stats = userInfo.stats || {};
 
   if (!user || typeof user !== "object") {
+    if (statusCode === 10221) {
+      return { user: null, stats: null, message: "account does not exist", statusCode };
+    }
+    if (statusCode === 209002) {
+      return { user: null, stats: null, message: "account is restricted by TikTok", statusCode };
+    }
     if (statusCode) {
       return {
         user: null,
         stats: null,
         message: `unavailable (statusCode=${statusCode} ${statusMsg})`.trim(),
+        statusCode,
       };
     }
-    return { user: null, stats: null, message: "profile_data_missing" };
+    return { user: null, stats: null, message: "profile_data_missing", statusCode };
   }
-  return { user, stats, message: "" };
+  return { user, stats, message: "", statusCode };
 }
 
-/** Hashtags and mentions, preferring TikTok's own annotation. */
+/**
+ * Read `{ userInfo, videos }` out of an embed page.
+ *
+ * The embed page is the only surface that lists a creator's recent posts
+ * without a signed API request. Its list is ordered newest-first.
+ */
+export function embedProfile(
+  html: string,
+  handle: string,
+): { userInfo: any; videos: any[] } {
+  const data = parseFrontity(html);
+  if (!data) return { userInfo: {}, videos: [] };
+
+  const wanted = handle.replace(/^@/, "").toLowerCase();
+  // The payload key mirrors the handle exactly as the page was requested,
+  // but case can differ (TikTok handles are lowercase while callers often
+  // are not). Match case-insensitively rather than losing the whole page.
+  const key =
+    Object.keys(data).find((candidate) => candidate.toLowerCase() === `/embed/@${wanted}`) ??
+    Object.keys(data).find((candidate) => candidate.toLowerCase().includes(`@${wanted}`));
+
+  const profile = key ? data[key] : undefined;
+  if (!profile || typeof profile !== "object") return { userInfo: {}, videos: [] };
+
+  const videos = (profile.videoList || []).filter(
+    (v: any) => v && typeof v === "object" && v.id,
+  );
+  // Video ids are time-ordered, so sorting descending guarantees newest-first.
+  videos.sort((a: any, b: any) => (BigInt(a.id) < BigInt(b.id) ? 1 : -1));
+  return { userInfo: profile.userInfo || {}, videos };
+}
+
+/** Convert an embed entry into the aweme shape `normalizeVideo` expects. */
+export function embedItemToAweme(item: any): any {
+  return {
+    id: item.id,
+    desc: item.desc || "",
+    author: { uniqueId: item.authorUniqueId || "" },
+    video: {
+      cover: item.coverUrl || "",
+      originCover: item.originCoverUrl || "",
+      dynamicCover: item.dynamicCoverUrl || "",
+      width: item.width,
+      height: item.height,
+      ratio: item.ratio,
+    },
+    stats: { playCount: item.playCount },
+  };
+}
+
+// ------------------------------------------------------------ normalising
+
 function textParts(item: any): { hashtags: string[]; mentions: string[] } {
   const hashtags: string[] = [];
   const mentions: string[] = [];
@@ -131,16 +384,12 @@ function textParts(item: any): { hashtags: string[]; mentions: string[] } {
 
   const caption = String(item.desc || "");
   if (!hashtags.length) {
-    // Capture group 1 excludes the leading "#", matching the Python scraper.
     for (const match of caption.matchAll(HASHTAG_RE)) {
       const tag = match[1];
-      if (tag && tag.toLowerCase() !== "fyp" && !hashtags.includes(tag)) {
-        hashtags.push(tag);
-      }
+      if (tag && tag.toLowerCase() !== "fyp" && !hashtags.includes(tag)) hashtags.push(tag);
     }
   }
   if (!mentions.length) {
-    // Capture group 1 excludes the leading "@".
     for (const match of caption.matchAll(MENTION_RE)) {
       const mention = match[1];
       if (mention && !mentions.includes(mention)) mentions.push(mention);
@@ -149,7 +398,6 @@ function textParts(item: any): { hashtags: string[]; mentions: string[] } {
   return { hashtags, mentions };
 }
 
-/** Engagement numbers, preferring the exact `statsV2` values. */
 function videoStats(item: any): Record<string, number | null> {
   const v2 = item.statsV2 || {};
   const base = item.stats || {};
@@ -166,7 +414,6 @@ function videoStats(item: any): Record<string, number | null> {
   };
 }
 
-/** Creator reach numbers, available on every video record. */
 function authorStats(item: any) {
   const stats = item.authorStats || {};
   const v2 = item.authorStatsV2 || {};
@@ -214,7 +461,6 @@ export function normalizeVideo(
   const creator = authorStats(item);
   const when = isoDate(parseNumber(item.createTime));
 
-  // Challenges carry the "official" hashtag for a video.
   for (const challenge of item.challenges || []) {
     const title = challenge?.title ? String(challenge.title) : "";
     if (title && !hashtags.some((h) => h.toLowerCase() === title.toLowerCase())) {
@@ -296,9 +542,7 @@ export function normalizeProfile(
     bioLink = user.bioLink;
   }
 
-  const createdTs = parseNumber(user.createTime);
-  const when = isoDate(createdTs);
-
+  const when = isoDate(parseNumber(user.createTime));
   const num = (value: number | null): number | string => (value === null ? "" : value);
 
   return {
@@ -392,6 +636,7 @@ export function failedProfile(
   handle: string,
   reason: string,
   scrapedAt: string,
+  status = "failed",
 ): ProfileRecord {
   const clean = String(handle || "").replace(/^@/, "");
   return {
@@ -419,109 +664,37 @@ export function failedProfile(
     show_music_tab: "",
     has_bio_link: "",
     scraped_at: scrapedAt,
-    status: "failed",
+    status,
     status_message: reason,
   };
 }
 
 /**
- * Fetch a TikTok page with browser-like headers.
+ * Run tasks with a bounded number in flight.
  *
- * TikTok throttles per IP with a token bucket: the first request or two from
- * a fresh Cloudflare egress address are answered with `429 Too Many
- * Requests`, and later ones succeed. Retrying with a short backoff is what
- * makes the embed page reliably reachable from the edge.
+ * Fetching 20 video pages one after another takes ~20 round trips and blows
+ * past any sensible timeout. With a small pool the same work finishes in a
+ * couple of round trips.
  */
-export async function fetchPage(
-  url: string,
-  language = "en-US",
-  retries = 4,
-): Promise<string> {
-  let lastStatus = 0;
-  let lastError = "";
+export async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+  delayMs = 0,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const width = Math.max(1, Math.min(limit, items.length));
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    if (attempt > 0) {
-      // 1s, 2s, 3s, 4s
-      await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+  const workers = Array.from({ length: width }, async () => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      if (delayMs > 0 && index > 0) await sleep(delayMs);
+      results[index] = await fn(items[index], index);
     }
-    try {
-      const response = await fetch(url, {
-        headers: {
-          "User-Agent": DEFAULT_UA,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": `${language},en;q=0.9`,
-          Referer: "https://www.tiktok.com/",
-          "Upgrade-Insecure-Requests": "1",
-        },
-        redirect: "follow",
-      });
+  });
 
-      if (response.ok) return await response.text();
-
-      lastStatus = response.status;
-      // Only throttle responses and server errors are worth retrying.
-      if (response.status !== 429 && response.status < 500) break;
-    } catch (error) {
-      lastError = String(error);
-    }
-  }
-
-  throw new Error(
-    `HTTP ${lastStatus}${lastError ? ` ${lastError}` : ""} for ${url}`,
-  );
-}
-
-/**
- * Parse the `__FRONTITY_CONNECT_STATE__` blob used by TikTok's public embed
- * pages. The embed page renders a creator's recent posts server-side, which
- * is the only reliable way to list a profile's posts without a browser or a
- * signed API request.
- */
-export function parseFrontity(html: string): any | null {
-  const match = FRONTITY_RE.exec(html);
-  if (!match) return null;
-  try {
-    const payload = JSON.parse(match[1]);
-    const data = payload?.source?.data;
-    return data && typeof data === "object" ? data : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Pull `{ userInfo, videos }` out of an embed page (videos are newest-first). */
-export function embedProfile(
-  html: string,
-  handle: string,
-): { userInfo: any; videos: any[] } {
-  const data = parseFrontity(html);
-  if (!data) return { userInfo: {}, videos: [] };
-  const key = `/embed/@${handle.replace(/^@/, "")}`;
-  const profile = data[key];
-  if (!profile || typeof profile !== "object") return { userInfo: {}, videos: [] };
-  const videos = (profile.videoList || []).filter(
-    (v: any) => v && typeof v === "object" && v.id,
-  );
-  // Video ids are time-ordered, so sorting descending guarantees newest-first.
-  videos.sort((a: any, b: any) => Number(BigInt(b.id) - BigInt(a.id)));
-  return { userInfo: profile.userInfo || {}, videos };
-}
-
-/** Convert an embed entry into the aweme shape `normalizeVideo` expects. */
-export function embedItemToAweme(item: any): any {
-  return {
-    id: item.id,
-    desc: item.desc || "",
-    author: { uniqueId: item.authorUniqueId || "" },
-    video: {
-      cover: item.coverUrl || "",
-      originCover: item.originCoverUrl || "",
-      dynamicCover: item.dynamicCoverUrl || "",
-      width: item.width,
-      height: item.height,
-      ratio: item.ratio,
-    },
-    stats: { playCount: item.playCount },
-  };
+  await Promise.all(workers);
+  return results;
 }
